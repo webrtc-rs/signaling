@@ -1,6 +1,6 @@
 [package]
 name = "signaling"
-version = "0.0.0"
+version = "0.20.0-rc.1"
 authors = ["Rain Liu <y@liu.mx>"]
 edition = "2024"
 description = "Signaling in Rust"
