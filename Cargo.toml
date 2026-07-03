@@ -1,0 +1,14 @@
+[package]
+name = "signaling"
+version = "0.0.0"
+authors = ["Rain Liu <y@liu.mx>"]
+edition = "2024"
+description = "Signaling in Rust"
+license = "MIT/Apache-2.0"
+documentation = "https://docs.rs/signaling"
+homepage = "https://webrtc.rs"
+repository = "https://github.com/webrtc-rs/signaling"
+keywords = ["signaling", "networking", "protocols"]
+categories = ["network-programming"]
+
+[dependencies]
