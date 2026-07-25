@@ -8,7 +8,7 @@ resolver = "2"
 opt-level = 0
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Rain Liu <y@liu.mx>"]
 edition = "2024"
 license = "MIT/Apache-2.0"
@@ -19,7 +19,8 @@ categories = ["network-programming"]
 
 [workspace.dependencies]
 sansio = "1.0.1"
-
+uuid = { version = "1", features = ["v4", "v8"] }
+base64 = "0.23.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 log = "0.4.33"
@@ -46,6 +47,8 @@ readme = "README.md"
 
 [dependencies]
 sansio.workspace = true
+uuid.workspace = true
+base64.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true

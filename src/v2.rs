@@ -1,12 +1,15 @@
 //! SFU-capable V2 room and worker state.
 //!
-//! Identifiers are numeric, browser registrations are admission-token bound,
-//! and P2P-to-SFU upgrades commit only after every `JoinMember` command has
-//! succeeded.
+//! Rooms are identified by a UUIDv8 minted by the service and clients by a numeric
+//! `u64`, browser registrations are admission-token bound, and P2P-to-SFU upgrades
+//! commit only after every `JoinMember` command has succeeded.
 
 use crate::sfu;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const MAX_P2P_MEMBERS: usize = 2;
 const MAX_QUEUED_MESSAGES: usize = 1024;
@@ -17,8 +20,58 @@ const EVENT_DEDUP_CAPACITY: usize = 4096;
 /// leaving and immediately rejoining) so the room does not flap between modes.
 const DOWNGRADE_DWELL: Duration = Duration::from_secs(2);
 
-pub type RoomId = u64;
+/// V2 rooms are identified by a UUIDv8 (RFC 9562 §5.8), minted by the service rather
+/// than chosen by a client. Clients remain numeric.
+pub type RoomId = Uuid;
 pub type ClientId = u64;
+
+/// Number of characters in a room token: 16 bytes of UUID, base64url, unpadded.
+pub const ROOM_TOKEN_LEN: usize = 22;
+
+/// Mint a room id: a UUIDv8 whose 122 free bits are random.
+///
+/// Version 8 is RFC 9562's application-defined layout, which is what lets this project
+/// give the remaining bits meaning later (a home-node tag, an expiry) without minting
+/// something that is no longer a well-formed UUID.
+pub fn new_room_id() -> RoomId {
+    // `new_v4` is the crate's route to the OS CSPRNG; `new_v8` then restamps the version
+    // and variant nibbles over it, leaving 122 random bits — the same 122 a v4 carries.
+    Uuid::new_v8(Uuid::new_v4().into_bytes())
+}
+
+/// Render a room id as the token that appears in a room link: base64url, unpadded.
+pub fn format_room_token(room_id: &RoomId) -> String {
+    URL_SAFE_NO_PAD.encode(room_id.as_bytes())
+}
+
+/// Parse a room token back into a room id, rejecting anything that is not exactly one
+/// canonical encoding of a UUIDv8.
+///
+/// Three checks, each closing a way for one room to acquire two identities:
+///   * exactly [`ROOM_TOKEN_LEN`] base64url characters — no padding, no whitespace;
+///   * canonical trailing bits. 128 is not a multiple of 6, so the final character
+///     carries 2 significant bits and 4 that must be zero. Sixteen distinct final
+///     characters would otherwise decode to the same UUID, and since rooms are keyed by
+///     the value received, those spellings would become sixteen different rooms. The
+///     decoder rejects non-zero trailing bits, so only `A`, `Q`, `g` and `w` can end a
+///     valid token;
+///   * version 8 and the RFC 9562 variant, so a v4 UUID or arbitrary 16 bytes is not
+///     mistaken for a token this service minted.
+pub fn parse_room_token(token: &str) -> Option<RoomId> {
+    if token.len() != ROOM_TOKEN_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+    let bytes: [u8; 16] = bytes.try_into().ok()?;
+    let room_id = Uuid::from_bytes(bytes);
+    is_room_uuid(&room_id).then_some(room_id)
+}
+
+/// True when `room_id` is a UUIDv8 with the RFC 9562 variant, the only shape this
+/// service mints or accepts.
+pub fn is_room_uuid(room_id: &RoomId) -> bool {
+    room_id.get_version_num() == 8 && matches!(room_id.get_variant(), uuid::Variant::RFC4122)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomMode {
@@ -852,7 +905,7 @@ impl RoomTable {
                 // the worker->signaling leg (before signaling relays it on to the browser).
                 log::info!(
                     "SFU event: instance_id={instance_id} operation=signal room_id={} client_id={}\n{}",
-                    signal.room_id,
+                    format_room_token(&signal.room_id),
                     signal.client_id,
                     signal.message_json
                 );
@@ -1352,7 +1405,8 @@ impl RoomTable {
         };
         let request_id = command.request_id;
         log::info!(
-            "SFU command: instance_id={instance_id} connection_id={connection_id} request_id={request_id} operation={operation} room_id={room_id} client_id={client_id}{body}"
+            "SFU command: instance_id={instance_id} connection_id={connection_id} request_id={request_id} operation={operation} room_id={} client_id={client_id}{body}",
+            format_room_token(&room_id)
         );
         self.pending_commands.insert(command.request_id, pending);
         self.command_workers.insert(command.request_id, instance_id);
@@ -1735,6 +1789,66 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    /// A deterministic, valid room id for tests: `new_v8` stamps the version and variant
+    /// over the seed, so `room(42)` is stable across runs and still parses as a token.
+    fn room(seed: u128) -> RoomId {
+        Uuid::new_v8(seed.to_be_bytes())
+    }
+
+    #[test]
+    fn room_tokens_round_trip_and_are_22_characters() {
+        for seed in [0, 1, 42, u128::MAX] {
+            let id = room(seed);
+            let token = format_room_token(&id);
+            assert_eq!(token.len(), ROOM_TOKEN_LEN, "token {token:?}");
+            assert_eq!(parse_room_token(&token), Some(id));
+        }
+        let minted = new_room_id();
+        assert!(is_room_uuid(&minted), "minted id must be a UUIDv8");
+        assert_eq!(parse_room_token(&format_room_token(&minted)), Some(minted));
+    }
+
+    #[test]
+    fn room_token_parsing_rejects_every_non_canonical_spelling() {
+        let id = room(42);
+        let token = format_room_token(&id);
+
+        // 128 bits is not a multiple of 6, so the final character carries 4 must-be-zero
+        // bits. Flipping any of them yields a string that decodes to the same UUID — if it
+        // were accepted, one room would answer to sixteen different links.
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let last = alphabet.find(token.chars().last().unwrap()).unwrap();
+        for bump in 1..16 {
+            let twin: String = token[..ROOM_TOKEN_LEN - 1]
+                .chars()
+                .chain(alphabet.chars().nth(last + bump))
+                .collect();
+            assert_ne!(twin, token);
+            assert_eq!(parse_room_token(&twin), None, "accepted twin {twin:?}");
+        }
+
+        for invalid in [
+            "",
+            "short",
+            &token[..ROOM_TOKEN_LEN - 1],                  // too short
+            &format!("{token}A"),                          // too long
+            &format!("{}=", &token[..ROOM_TOKEN_LEN - 1]), // padded
+            &token.to_lowercase(), // case-folded: a different UUID or invalid
+            "не-ascii-токен-2222222",
+        ] {
+            assert_eq!(parse_room_token(invalid), None, "accepted {invalid:?}");
+        }
+
+        // A v4 UUID is well-formed but is not something this service minted.
+        let v4 = Uuid::new_v4();
+        assert!(!is_room_uuid(&v4));
+        assert_eq!(
+            parse_room_token(&URL_SAFE_NO_PAD.encode(v4.as_bytes())),
+            None,
+            "a non-v8 UUID must not parse as a room token"
+        );
+    }
+
     fn register_ready_worker(rooms: &mut RoomTable) {
         rooms
             .handle_sfu_input(sfu::Input::Register {
@@ -1779,27 +1893,40 @@ mod tests {
     fn admission_registration_relay_and_promotion() {
         let now = Instant::now();
         let mut rooms = RoomTable::new(Duration::from_secs(10));
-        let first = match rooms.admit(1, now, 42, 101, "token-1".into()).unwrap() {
+        let first = match rooms
+            .admit(1, now, room(42), 101, "token-1".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(value) => value,
             AdmissionResult::Pending => panic!("first join cannot be pending"),
         };
-        let second = match rooms.admit(2, now, 42, 102, "token-2".into()).unwrap() {
+        let second = match rooms
+            .admit(2, now, room(42), 102, "token-2".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(value) => value,
             AdmissionResult::Pending => panic!("second join cannot be pending"),
         };
         assert_eq!(first.is_initiator, Some(true));
         assert_eq!(second.is_initiator, Some(false));
         assert_eq!(
-            rooms.admit(3, now, 42, 103, "token-3".into()),
+            rooms.admit(3, now, room(42), 103, "token-3".into()),
             Err("NO_SFU_AVAILABLE".into())
         );
-        rooms.register(42, 101, &first.admission_token).unwrap();
-        rooms.register(42, 102, &second.admission_token).unwrap();
+        rooms
+            .register(room(42), 101, &first.admission_token)
+            .unwrap();
+        rooms
+            .register(room(42), 102, &second.admission_token)
+            .unwrap();
         assert!(matches!(
-            rooms.send(42, 101, 0, "candidate".into()).unwrap(),
+            rooms.send(room(42), 101, 0, "candidate".into()).unwrap(),
             SendResult::P2p(Some(Delivery { client_id: 102, .. }))
         ));
-        let promotion = match rooms.remove(3, 42, 102, &second.admission_token).unwrap() {
+        let promotion = match rooms
+            .remove(3, room(42), 102, &second.admission_token)
+            .unwrap()
+        {
             RemovalResult::Complete(Some(promotion)) => promotion,
             result => panic!("unexpected removal result: {result:?}"),
         };
@@ -1816,24 +1943,39 @@ mod tests {
         let mut rooms = RoomTable::new(Duration::from_secs(10));
 
         // Room 7: two members, one of which disconnects and starts its reconnect grace.
-        let leaving = match rooms.admit(1, now, 7, 701, "token-701".into()).unwrap() {
+        let leaving = match rooms
+            .admit(1, now, room(7), 701, "token-701".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(value) => value,
             result => panic!("unexpected admission: {result:?}"),
         };
-        let staying = match rooms.admit(2, now, 7, 702, "token-702".into()).unwrap() {
+        let staying = match rooms
+            .admit(2, now, room(7), 702, "token-702".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(value) => value,
             result => panic!("unexpected admission: {result:?}"),
         };
-        rooms.register(7, 701, &leaving.admission_token).unwrap();
-        rooms.register(7, 702, &staying.admission_token).unwrap();
-        rooms.deregister(now, 7, 701);
+        rooms
+            .register(room(7), 701, &leaving.admission_token)
+            .unwrap();
+        rooms
+            .register(room(7), 702, &staying.admission_token)
+            .unwrap();
+        rooms.deregister(now, room(7), 701);
 
         // Room 42: a single registered member waiting for someone to join.
-        let alone = match rooms.admit(3, now, 42, 101, "token-101".into()).unwrap() {
+        let alone = match rooms
+            .admit(3, now, room(42), 101, "token-101".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(value) => value,
             result => panic!("unexpected admission: {result:?}"),
         };
-        rooms.register(42, 101, &alone.admission_token).unwrap();
+        rooms
+            .register(room(42), 101, &alone.admission_token)
+            .unwrap();
 
         // Room 7's grace expires. Its survivor is promoted; room 42 must be untouched.
         let promotions = rooms.handle_timeout(now + Duration::from_secs(11));
@@ -1842,7 +1984,7 @@ mod tests {
             1,
             "only room 7 may promote: {promotions:?}"
         );
-        assert_eq!(promotions[0].room_id, 7);
+        assert_eq!(promotions[0].room_id, room(7));
         assert_eq!(promotions[0].client_id, 702);
 
         // And a later sweep with nothing pending promotes nobody at all.
@@ -1862,13 +2004,15 @@ mod tests {
         for (request, client) in [(10, 101), (11, 102)] {
             assert!(matches!(
                 rooms
-                    .admit(request, now, 42, client, format!("token-{client}"))
+                    .admit(request, now, room(42), client, format!("token-{client}"))
                     .unwrap(),
                 AdmissionResult::Complete(_)
             ));
         }
         assert_eq!(
-            rooms.admit(12, now, 42, 103, "token-103".into()).unwrap(),
+            rooms
+                .admit(12, now, room(42), 103, "token-103".into())
+                .unwrap(),
             AdmissionResult::Pending
         );
         for expected_client in [101, 102, 103] {
@@ -1911,10 +2055,12 @@ mod tests {
                 }),
             })
         ));
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Sfu));
 
         assert_eq!(
-            rooms.admit(13, now, 42, 104, "token-104".into()).unwrap(),
+            rooms
+                .admit(13, now, room(42), 104, "token-104".into())
+                .unwrap(),
             AdmissionResult::Pending
         );
         let command = match rooms.poll_action().unwrap() {
@@ -1946,10 +2092,10 @@ mod tests {
                 }),
             })
         ));
-        assert_eq!(rooms.occupancy(42), (4, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (4, RoomMode::Sfu));
 
         assert_eq!(
-            rooms.remove(14, 42, 104, "token-104").unwrap(),
+            rooms.remove(14, room(42), 104, "token-104").unwrap(),
             RemovalResult::Pending
         );
         let command = match rooms.poll_action().unwrap() {
@@ -1979,10 +2125,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Sfu));
 
         assert_eq!(
-            rooms.send(42, 101, 1, r#"{"type":"candidate"}"#.into()),
+            rooms.send(room(42), 101, 1, r#"{"type":"candidate"}"#.into()),
             Ok(SendResult::Sfu)
         );
         let pending_signal = match rooms.poll_action().unwrap() {
@@ -2042,7 +2188,7 @@ mod tests {
             Some(Action::Sfu(sfu::Output::Command { command, connection_id: 10 }))
                 if command == pending_signal
         ));
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Sfu));
     }
 
     #[test]
@@ -2052,10 +2198,12 @@ mod tests {
         register_ready_worker(&mut rooms);
         for (request, client) in [(10, 101), (11, 102)] {
             rooms
-                .admit(request, now, 42, client, format!("token-{client}"))
+                .admit(request, now, room(42), client, format!("token-{client}"))
                 .unwrap();
         }
-        rooms.admit(12, now, 42, 103, "token-103".into()).unwrap();
+        rooms
+            .admit(12, now, room(42), 103, "token-103".into())
+            .unwrap();
         for _ in 0..3 {
             let command = match rooms.poll_action().unwrap() {
                 Action::Sfu(sfu::Output::Command { command, .. }) => command,
@@ -2092,9 +2240,9 @@ mod tests {
         rooms.handle_timeout(now + Duration::from_secs(10));
         assert!(matches!(
             rooms.poll_action(),
-            Some(Action::RoomFailed { room_id: 42, .. })
+            Some(Action::RoomFailed { room_id, .. }) if room_id == room(42)
         ));
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Failed));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Failed));
     }
 
     #[test]
@@ -2102,12 +2250,19 @@ mod tests {
         let now = Instant::now();
         let mut rooms = RoomTable::new(Duration::from_secs(10));
         register_ready_worker(&mut rooms);
-        let first = match rooms.admit(10, now, 42, 101, "token-101".into()).unwrap() {
+        let first = match rooms
+            .admit(10, now, room(42), 101, "token-101".into())
+            .unwrap()
+        {
             AdmissionResult::Complete(admission) => admission,
             result => panic!("unexpected admission: {result:?}"),
         };
-        rooms.admit(11, now, 42, 102, "token-102".into()).unwrap();
-        rooms.admit(12, now, 42, 103, "token-103".into()).unwrap();
+        rooms
+            .admit(11, now, room(42), 102, "token-102".into())
+            .unwrap();
+        rooms
+            .admit(12, now, room(42), 103, "token-103".into())
+            .unwrap();
         for _ in 0..3 {
             let command = match rooms.poll_action().unwrap() {
                 Action::Sfu(sfu::Output::Command { command, .. }) => command,
@@ -2129,15 +2284,17 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Sfu));
 
         // Register client 101's browser WebSocket, then drain the upgrade/registration actions.
-        rooms.register(42, 101, &first.admission_token).unwrap();
+        rooms
+            .register(room(42), 101, &first.admission_token)
+            .unwrap();
         while rooms.poll_action().is_some() {}
 
         // The WebSocket drops (browser close/refresh). An SFU member must be left immediately —
         // no reconnect grace — so the worker stops forwarding its media right away.
-        rooms.deregister(now, 42, 101);
+        rooms.deregister(now, room(42), 101);
         let command = match rooms.poll_action().unwrap() {
             Action::Sfu(sfu::Output::Command { command, .. }) => command,
             action => panic!("expected immediate leave command, got: {action:?}"),
@@ -2146,7 +2303,7 @@ mod tests {
             sfu::CommandKind::Leave(leave) => leave,
             other => panic!("expected leave, got: {other:?}"),
         };
-        assert_eq!(leave.room_id, 42);
+        assert_eq!(leave.room_id, room(42));
         assert_eq!(leave.client_id, 101);
         assert!(matches!(leave.reason, sfu::LeaveReason::Disconnected));
         assert!(rooms.poll_action().is_none());
@@ -2159,7 +2316,7 @@ mod tests {
         register_ready_worker(&mut rooms);
         let tokens = [(10, 101), (11, 102), (12, 103)].map(|(request, client)| {
             match rooms
-                .admit(request, now, 42, client, format!("token-{client}"))
+                .admit(request, now, room(42), client, format!("token-{client}"))
                 .unwrap()
             {
                 AdmissionResult::Complete(admission) => (client, admission.admission_token),
@@ -2187,16 +2344,16 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(rooms.occupancy(42), (3, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (3, RoomMode::Sfu));
         // Register the members so they carry no reconnect deadline (as real SFU members do).
         for (client, token) in &tokens {
-            rooms.register(42, *client, token).unwrap();
+            rooms.register(room(42), *client, token).unwrap();
         }
         while rooms.poll_action().is_some() {}
 
         // The third member leaves; drive its MemberLeft so the room shrinks to two.
         assert_eq!(
-            rooms.remove(14, 42, 103, "token-103").unwrap(),
+            rooms.remove(14, room(42), 103, "token-103").unwrap(),
             RemovalResult::Pending
         );
         let command = match rooms.poll_action().unwrap() {
@@ -2219,13 +2376,13 @@ mod tests {
             })
             .unwrap();
         while rooms.poll_action().is_some() {}
-        assert_eq!(rooms.occupancy(42), (2, RoomMode::Sfu));
+        assert_eq!(rooms.occupancy(room(42)), (2, RoomMode::Sfu));
 
         // The dwell is armed and does not fire early.
         assert!(rooms.poll_timeout().is_some());
         rooms.handle_timeout(now + Duration::from_secs(1));
         assert_eq!(
-            rooms.occupancy(42),
+            rooms.occupancy(room(42)),
             (2, RoomMode::Sfu),
             "downgrade must wait out the dwell"
         );
@@ -2233,7 +2390,7 @@ mod tests {
 
         // After the dwell, the room downgrades to direct P2P.
         rooms.handle_timeout(now + DOWNGRADE_DWELL + Duration::from_secs(1));
-        assert_eq!(rooms.occupancy(42), (2, RoomMode::P2p));
+        assert_eq!(rooms.occupancy(room(42)), (2, RoomMode::P2p));
 
         let mut leaves = 0;
         let mut downgraded = false;
@@ -2249,7 +2406,7 @@ mod tests {
                     initiator_client_id,
                     mut clients,
                 } => {
-                    assert_eq!(room_id, 42);
+                    assert_eq!(room_id, room(42));
                     assert_eq!(signal_epoch, 2, "P2P->SFU->P2P bumps the epoch twice");
                     assert_eq!(initiator_client_id, 101, "lowest client id offers");
                     clients.sort_unstable();
@@ -2264,9 +2421,14 @@ mod tests {
 
         // A fresh third join can upgrade the room again.
         assert_eq!(
-            rooms.admit(20, now, 42, 104, "token-104".into()).unwrap(),
+            rooms
+                .admit(20, now, room(42), 104, "token-104".into())
+                .unwrap(),
             AdmissionResult::Pending
         );
-        assert!(matches!(rooms.occupancy(42), (3, RoomMode::Upgrading)));
+        assert!(matches!(
+            rooms.occupancy(room(42)),
+            (3, RoomMode::Upgrading)
+        ));
     }
 }

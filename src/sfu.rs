@@ -30,7 +30,7 @@ pub struct Health {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinMember {
-    pub room_id: u64,
+    pub room_id: crate::v2::RoomId,
     pub client_id: u64,
     pub lifecycle_id: u64,
     pub assignment_epoch: u64,
@@ -44,20 +44,20 @@ pub struct MemberProjection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncRoom {
-    pub room_id: u64,
+    pub room_id: crate::v2::RoomId,
     pub assignment_epoch: u64,
     pub members: Vec<MemberProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomSynced {
-    pub room_id: u64,
+    pub room_id: crate::v2::RoomId,
     pub assignment_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveMember {
-    pub room_id: u64,
+    pub room_id: crate::v2::RoomId,
     pub client_id: u64,
     pub lifecycle_id: u64,
     pub assignment_epoch: u64,
@@ -74,7 +74,7 @@ pub enum LeaveReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
-    pub room_id: u64,
+    pub room_id: crate::v2::RoomId,
     pub client_id: u64,
     pub lifecycle_id: u64,
     pub assignment_epoch: u64,
@@ -122,7 +122,7 @@ pub enum EventKind {
     Health(Health),
     Failure {
         error: Error,
-        room_id: Option<u64>,
+        room_id: Option<crate::v2::RoomId>,
         client_id: Option<u64>,
         lifecycle_id: Option<u64>,
         sdp_request_id: Option<u64>,

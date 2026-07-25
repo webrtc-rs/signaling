@@ -169,11 +169,18 @@ message InjectV1Request {
 
 // ---------------------------------------------------------------------------
 // AppRTC V2 RPCs
+//
+// Every V2 `bytes room_id` carries exactly the 16 bytes of a UUIDv8 in network order.
+// Bytes rather than a text form because it admits exactly one encoding: a string field
+// would let the same room arrive under several spellings (hyphenated, simple, base64url,
+// mixed case) and rooms are keyed by the value received. Receivers reject any length
+// other than 16. V1 room ids remain opaque `string` and are unaffected. V2 `client_id`
+// stays `uint64`.
 // ---------------------------------------------------------------------------
 
 message AdmitV2Request {
   RequestContext context = 1;
-  uint64 room_id = 2;
+  bytes room_id = 2;
   uint64 client_id = 3;
 }
 
@@ -200,14 +207,14 @@ message V2Admission {
 
 message RemoveV2Request {
   RequestContext context = 1;
-  uint64 room_id = 2;
+  bytes room_id = 2;
   uint64 client_id = 3;
   string admission_token = 4;
 }
 
 message OccupancyV2Request {
   RequestContext context = 1;
-  uint64 room_id = 2;
+  bytes room_id = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,25 +353,25 @@ message MemberProjection {
 }
 
 message SyncRoom {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 assignment_epoch = 2;
   repeated MemberProjection members = 3;
 }
 
 message RoomSynced {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 assignment_epoch = 2;
 }
 
 message JoinMember {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 client_id = 2;
   uint64 lifecycle_id = 3;
   uint64 assignment_epoch = 4;
 }
 
 message MemberJoined {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 client_id = 2;
   uint64 lifecycle_id = 3;
   uint64 assignment_epoch = 4;
@@ -380,7 +387,7 @@ enum LeaveReason {
 }
 
 message LeaveMember {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 client_id = 2;
   uint64 lifecycle_id = 3;
   uint64 assignment_epoch = 4;
@@ -388,7 +395,7 @@ message LeaveMember {
 }
 
 message MemberLeft {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 client_id = 2;
   uint64 lifecycle_id = 3;
   uint64 assignment_epoch = 4;
@@ -398,7 +405,7 @@ message MemberLeft {
 // answer, one trickle ICE candidate, an end-of-candidates marker, or bye. The
 // SFU adapter parses it; the signaling authority does not.
 message SfuSignal {
-  uint64 room_id = 1;
+  bytes room_id = 1;
   uint64 client_id = 2;
   uint64 lifecycle_id = 3;
   uint64 assignment_epoch = 4;
@@ -434,7 +441,7 @@ message SfuEventAck {
 
 message SfuFailure {
   Error error = 1;
-  optional uint64 room_id = 2;
+  optional bytes room_id = 2;
   optional uint64 client_id = 3;
   optional uint64 lifecycle_id = 4;
   optional uint64 sdp_request_id = 5;

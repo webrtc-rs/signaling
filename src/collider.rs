@@ -277,7 +277,8 @@ impl Collider {
             self.fail_connection(connection_id, "Duplicated register request");
             return Ok(());
         }
-        let room_id = match canonical_u64(&msg.roomid) {
+        // The browser sends back the same base64url token its room link carried.
+        let room_id = match v2::parse_room_token(&msg.roomid) {
             Some(value) => value,
             None => {
                 self.fail_connection(connection_id, "INVALID_ROOM_ID");
@@ -303,7 +304,8 @@ impl Collider {
             }
         };
         log::info!(
-            "V2 register: connection_id={connection_id} room_id={room_id} client_id={client_id} epoch={}",
+            "V2 register: connection_id={connection_id} room_id={} client_id={client_id} epoch={}",
+            v2::format_room_token(&room_id),
             registration.signal_epoch
         );
         self.sessions
@@ -314,7 +316,8 @@ impl Collider {
 
         // The authoritative snapshot must precede any queued SDP/ICE messages.
         log::info!(
-            "V2 control: control=registered connection_id={connection_id} room_id={room_id} client_id={client_id} epoch={} mode={}",
+            "V2 control: control=registered connection_id={connection_id} room_id={} client_id={client_id} epoch={} mode={}",
+            v2::format_room_token(&room_id),
             registration.signal_epoch,
             room_mode_name(registration.mode)
         );
@@ -322,7 +325,7 @@ impl Collider {
             connection_id,
             text: to_wire(&V2Registered {
                 control: "registered",
-                roomid: room_id.to_string(),
+                roomid: v2::format_room_token(&room_id),
                 epoch: registration.signal_epoch.to_string(),
                 mode: room_mode_name(registration.mode),
                 is_initiator: registration.is_initiator,
@@ -333,7 +336,8 @@ impl Collider {
         // it (the same "V2 deliver" the relay path logs).
         for message in registration.queued_messages {
             log::info!(
-                "V2 deliver: connection_id={connection_id} room_id={room_id} client_id={client_id} bytes={}\n{}",
+                "V2 deliver: connection_id={connection_id} room_id={} client_id={client_id} bytes={}\n{}",
+                v2::format_room_token(&room_id),
                 message.len(),
                 message
             );
@@ -380,14 +384,16 @@ impl Collider {
             Session::RegisteredV2 { room_id, client_id } => {
                 let Some(signal_epoch) = msg.epoch.as_ref().and_then(canonical_json_u64) else {
                     log::info!(
-                        "V2 send dropped: connection_id={connection_id} room_id={room_id} client_id={client_id} reason=invalid_epoch"
+                        "V2 send dropped: connection_id={connection_id} room_id={} client_id={client_id} reason=invalid_epoch",
+                        v2::format_room_token(&room_id)
                     );
                     return Ok(());
                 };
                 // The full body follows on the next line to show the
                 // SDP/candidate under a click-to-expand [+]. signaling never parses this payload.
                 log::info!(
-                    "V2 send: connection_id={connection_id} room_id={room_id} client_id={client_id} epoch={signal_epoch} bytes={}\n{}",
+                    "V2 send: connection_id={connection_id} room_id={} client_id={client_id} epoch={signal_epoch} bytes={}\n{}",
+                    v2::format_room_token(&room_id),
                     msg.msg.len(),
                     msg.msg
                 );
@@ -400,7 +406,7 @@ impl Collider {
                 {
                     log::info!(
                         "V2 deliver: connection_id={peer_connection} room_id={} client_id={} bytes={}\n{}",
-                        delivery.room_id,
+                        v2::format_room_token(&delivery.room_id),
                         delivery.client_id,
                         delivery.message.len(),
                         delivery.message
@@ -479,7 +485,7 @@ impl Collider {
         {
             log::info!(
                 "V2 control: control=p2p-promote connection_id={connection_id} room_id={} client_id={} epoch={}",
-                promotion.room_id,
+                v2::format_room_token(&promotion.room_id),
                 promotion.client_id,
                 promotion.signal_epoch
             );
@@ -487,7 +493,7 @@ impl Collider {
                 connection_id,
                 text: to_wire(&V2Promoted {
                     control: "p2p-promote",
-                    roomid: promotion.room_id.to_string(),
+                    roomid: v2::format_room_token(&promotion.room_id),
                     epoch: promotion.signal_epoch.to_string(),
                     is_initiator: true,
                 }),
@@ -669,13 +675,14 @@ impl Collider {
                         if let Some(&connection_id) = self.v2_connections.get(&(room_id, client_id))
                         {
                             log::info!(
-                                "V2 control: control=sfu-upgrade connection_id={connection_id} room_id={room_id} client_id={client_id} epoch={signal_epoch}"
+                                "V2 control: control=sfu-upgrade connection_id={connection_id} room_id={} client_id={client_id} epoch={signal_epoch}",
+                                v2::format_room_token(&room_id)
                             );
                             self.browser_outputs.push_back(BrowserOutput::Text {
                                 connection_id,
                                 text: to_wire(&V2Upgrade {
                                     control: "sfu-upgrade",
-                                    roomid: room_id.to_string(),
+                                    roomid: v2::format_room_token(&room_id),
                                     epoch: signal_epoch.to_string(),
                                 }),
                             });
@@ -692,14 +699,15 @@ impl Collider {
                         if let Some(&connection_id) = self.v2_connections.get(&(room_id, client_id))
                         {
                             log::info!(
-                                "V2 control: control=sfu-downgrade connection_id={connection_id} room_id={room_id} client_id={client_id} epoch={signal_epoch} is_initiator={}",
+                                "V2 control: control=sfu-downgrade connection_id={connection_id} room_id={} client_id={client_id} epoch={signal_epoch} is_initiator={}",
+                                v2::format_room_token(&room_id),
                                 client_id == initiator_client_id
                             );
                             self.browser_outputs.push_back(BrowserOutput::Text {
                                 connection_id,
                                 text: to_wire(&V2Downgrade {
                                     control: "sfu-downgrade",
-                                    roomid: room_id.to_string(),
+                                    roomid: v2::format_room_token(&room_id),
                                     epoch: signal_epoch.to_string(),
                                     is_initiator: client_id == initiator_client_id,
                                 }),
@@ -714,7 +722,7 @@ impl Collider {
                     {
                         log::info!(
                             "V2 deliver: connection_id={connection_id} room_id={} client_id={} bytes={}\n{}",
-                            delivery.room_id,
+                            v2::format_room_token(&delivery.room_id),
                             delivery.client_id,
                             delivery.message.len(),
                             delivery.message
@@ -734,13 +742,14 @@ impl Collider {
                         if let Some(&connection_id) = self.v2_connections.get(&(room_id, client_id))
                         {
                             log::info!(
-                                "V2 control: control=room-failed connection_id={connection_id} room_id={room_id} client_id={client_id} reason={reason}"
+                                "V2 control: control=room-failed connection_id={connection_id} room_id={} client_id={client_id} reason={reason}",
+                                v2::format_room_token(&room_id)
                             );
                             self.browser_outputs.push_back(BrowserOutput::Text {
                                 connection_id,
                                 text: to_wire(&V2RoomFailed {
                                     control: "room-failed",
-                                    roomid: room_id.to_string(),
+                                    roomid: v2::format_room_token(&room_id),
                                     reason: reason.clone(),
                                 }),
                             });
@@ -858,6 +867,16 @@ fn room_mode_name(mode: v2::RoomMode) -> &'static str {
 mod tests {
     use super::*;
 
+    /// A deterministic, valid V2 room id for tests, plus its wire token. `new_v8` stamps
+    /// the version and variant over the seed, so these are stable and parse as tokens.
+    fn room(seed: u128) -> v2::RoomId {
+        uuid::Uuid::new_v8(seed.to_be_bytes())
+    }
+
+    fn room_token(seed: u128) -> String {
+        v2::format_room_token(&room(seed))
+    }
+
     fn text(collider: &mut Collider, connection_id: u64, value: &str, now: Instant) {
         collider
             .handle_read(BrowserInput::Text {
@@ -962,7 +981,7 @@ mod tests {
             &mut collider,
             1,
             AuthorityOperation::AdmitV2 {
-                room_id: 42,
+                room_id: room(42),
                 client_id: 101,
                 admission_token: "token-101".into(),
                 now,
@@ -980,7 +999,7 @@ mod tests {
             &mut collider,
             2,
             AuthorityOperation::AdmitV2 {
-                room_id: 42,
+                room_id: room(42),
                 client_id: 102,
                 admission_token: "token-102".into(),
                 now,
@@ -1001,7 +1020,8 @@ mod tests {
             &mut collider,
             10,
             &format!(
-                r#"{{"cmd":"register","roomid":"42","clientid":"101","ver":2,"token":"{first_token}"}}"#
+                r#"{{"cmd":"register","roomid":"{}","clientid":"101","ver":2,"token":"{first_token}"}}"#,
+                room_token(42)
             ),
             now,
         );
@@ -1009,14 +1029,18 @@ mod tests {
             collider.poll_write(),
             Some(BrowserOutput::Text {
                 connection_id: 10,
-                text: r#"{"control":"registered","roomid":"42","epoch":"0","mode":"p2p","is_initiator":true}"#.into(),
+                text: format!(
+                    r#"{{"control":"registered","roomid":"{}","epoch":"0","mode":"p2p","is_initiator":true}}"#,
+                    room_token(42)
+                ),
             })
         );
         text(
             &mut collider,
             20,
             &format!(
-                r#"{{"cmd":"register","roomid":"42","clientid":"102","ver":2,"token":"{second_token}"}}"#
+                r#"{{"cmd":"register","roomid":"{}","clientid":"102","ver":2,"token":"{second_token}"}}"#,
+                room_token(42)
             ),
             now,
         );
@@ -1024,7 +1048,10 @@ mod tests {
             collider.poll_write(),
             Some(BrowserOutput::Text {
                 connection_id: 20,
-                text: r#"{"control":"registered","roomid":"42","epoch":"0","mode":"p2p","is_initiator":false}"#.into(),
+                text: format!(
+                    r#"{{"control":"registered","roomid":"{}","epoch":"0","mode":"p2p","is_initiator":false}}"#,
+                    room_token(42)
+                ),
             })
         );
 
@@ -1064,7 +1091,7 @@ mod tests {
         text(
             &mut collider,
             1,
-            r#"{"cmd":"register","roomid":"042","clientid":"1","ver":2,"token":"x"}"#,
+            r#"{"cmd":"register","roomid":"not-a-room-token","clientid":"1","ver":2,"token":"x"}"#,
             now,
         );
         assert_error_and_close(&mut collider, 1, "INVALID_ROOM_ID");
@@ -1073,7 +1100,10 @@ mod tests {
         text(
             &mut collider,
             2,
-            r#"{"cmd":"register","roomid":"42","clientid":"1","ver":2,"token":"wrong"}"#,
+            &format!(
+                r#"{{"cmd":"register","roomid":"{}","clientid":"1","ver":2,"token":"wrong"}}"#,
+                room_token(42)
+            ),
             now,
         );
         assert_error_and_close(&mut collider, 2, "UNAUTHORIZED");
@@ -1084,7 +1114,7 @@ mod tests {
                     &mut collider,
                     request_id,
                     AuthorityOperation::AdmitV2 {
-                        room_id: 42,
+                        room_id: room(42),
                         client_id,
                         admission_token: format!("token-{client_id}"),
                         now,
@@ -1098,7 +1128,7 @@ mod tests {
                 &mut collider,
                 3,
                 AuthorityOperation::AdmitV2 {
-                    room_id: 42,
+                    room_id: room(42),
                     client_id: 3,
                     admission_token: "token-3".into(),
                     now,
@@ -1122,7 +1152,7 @@ mod tests {
                 &mut collider,
                 request_id,
                 AuthorityOperation::AdmitV2 {
-                    room_id: 9,
+                    room_id: room(9),
                     client_id,
                     admission_token: format!("token-{client_id}"),
                     now,
@@ -1137,7 +1167,8 @@ mod tests {
                 &mut collider,
                 client_id,
                 &format!(
-                    r#"{{"cmd":"register","roomid":"9","clientid":"{client_id}","ver":2,"token":"{}"}}"#,
+                    r#"{{"cmd":"register","roomid":"{}","clientid":"{client_id}","ver":2,"token":"{}"}}"#,
+                    room_token(9),
                     tokens.last().unwrap()
                 ),
                 now,
@@ -1150,7 +1181,7 @@ mod tests {
                 &mut collider,
                 3,
                 AuthorityOperation::RemoveV2 {
-                    room_id: 9,
+                    room_id: room(9),
                     client_id: 2,
                     admission_token: tokens[1].clone(),
                 }
@@ -1165,8 +1196,10 @@ mod tests {
             collider.poll_write(),
             Some(BrowserOutput::Text {
                 connection_id: 1,
-                text: r#"{"control":"p2p-promote","roomid":"9","epoch":"0","is_initiator":true}"#
-                    .into(),
+                text: format!(
+                    r#"{{"control":"p2p-promote","roomid":"{}","epoch":"0","is_initiator":true}}"#,
+                    room_token(9)
+                ),
             })
         );
     }
@@ -1181,7 +1214,7 @@ mod tests {
                     &mut collider,
                     request_id,
                     AuthorityOperation::AdmitV2 {
-                        room_id: 5,
+                        room_id: room(5),
                         client_id,
                         admission_token: format!("token-{client_id}"),
                         now,
@@ -1194,7 +1227,10 @@ mod tests {
         text(
             &mut collider,
             1,
-            r#"{"cmd":"register","roomid":"5","clientid":"1","ver":2,"token":"token-1"}"#,
+            &format!(
+                r#"{{"cmd":"register","roomid":"{}","clientid":"1","ver":2,"token":"token-1"}}"#,
+                room_token(5)
+            ),
             now,
         );
         let _ = collider.poll_write();
@@ -1214,7 +1250,10 @@ mod tests {
         text(
             &mut collider,
             2,
-            r#"{"cmd":"register","roomid":"5","clientid":"2","ver":2,"token":"token-2"}"#,
+            &format!(
+                r#"{{"cmd":"register","roomid":"{}","clientid":"2","ver":2,"token":"token-2"}}"#,
+                room_token(5)
+            ),
             now,
         );
         assert!(matches!(
