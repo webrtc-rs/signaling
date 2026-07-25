@@ -1,0 +1,441 @@
+syntax = "proto3";
+
+package signaling.v2;
+
+// Private gRPC API exposed by the signaling service.
+//
+// AppRTC uses unary RPCs. An SFU process owns one OpenSfuSession stream for its
+// process lifetime and reconnects that stream with the same instance_id after
+// a transient transport failure.
+service SignalingService {
+  // AppRTC V1 compatibility operations. V1 identifiers remain opaque strings.
+  rpc AdmitV1(AdmitV1Request) returns (AdmitV1Response);
+  rpc RemoveV1(RemoveV1Request) returns (OperationResponse);
+  rpc OccupancyV1(OccupancyV1Request) returns (OccupancyResponse);
+  rpc InjectV1(InjectV1Request) returns (OperationResponse);
+
+  // SFU-capable AppRTC V2 operations. V2 room and client identifiers are u64.
+  rpc AdmitV2(AdmitV2Request) returns (AdmitV2Response);
+  rpc RemoveV2(RemoveV2Request) returns (OperationResponse);
+  rpc OccupancyV2(OccupancyV2Request) returns (OccupancyResponse);
+
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+
+  // The first SfuToSignaling message must be RegisterSfu. Signaling rejects
+  // every other first message with an UNAUTHENTICATED or INVALID_ARGUMENT
+  // gRPC status and closes the stream.
+  rpc OpenSfuSession(stream SfuToSignaling) returns (stream SignalingToSfu);
+}
+
+// Identifies the calling service role. Authentication must independently
+// authorize the mTLS identity for the declared role.
+enum AppId {
+  APP_ID_UNSPECIFIED = 0;
+  APP_ID_APPRTC = 1;
+  APP_ID_SFU = 2;
+}
+
+// Identity of one logical operation. request_id is allocated before the first
+// attempt and MUST remain unchanged across retries. The idempotency key is
+// (app_id, instance_id, request_id).
+message RequestContext {
+  AppId app_id = 1;
+
+  // Globally unique process incarnation, preferably UUIDv4 or UUIDv7. It is
+  // generated once at process startup, reused across reconnects, and never
+  // reused after restart.
+  string instance_id = 2;
+
+  // Nonzero and monotonically allocated within one instance_id.
+  uint64 request_id = 3;
+}
+
+message ResponseContext {
+  // Echoes the corresponding request's request_id.
+  uint64 request_id = 1;
+}
+
+message Empty {}
+
+// Expected domain failures are returned in response messages. Authentication,
+// malformed Protobuf, deadline, cancellation, and unavailable transport errors
+// use native gRPC status codes.
+message Error {
+  ErrorCode code = 1;
+  string reason = 2;
+  bool retryable = 3;
+  optional uint64 retry_after_ms = 4;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INVALID_REQUEST = 1;
+  ERROR_CODE_UNAUTHORIZED = 2;
+  ERROR_CODE_ROOM_NOT_FOUND = 3;
+  ERROR_CODE_CLIENT_NOT_FOUND = 4;
+  ERROR_CODE_VERSION_MISMATCH = 5;
+  ERROR_CODE_DUPLICATE_CLIENT = 6;
+  ERROR_CODE_FULL = 7;
+  ERROR_CODE_NO_SFU_AVAILABLE = 8;
+  ERROR_CODE_ROOM_TRANSITION = 9;
+  ERROR_CODE_WORKER_UNAVAILABLE = 10;
+  ERROR_CODE_STALE_ASSIGNMENT_EPOCH = 11;
+  ERROR_CODE_STALE_LIFECYCLE = 12;
+  ERROR_CODE_INVALID_SIGNAL = 13;
+  ERROR_CODE_RESOURCE_EXHAUSTED = 14;
+  ERROR_CODE_INTERNAL = 15;
+}
+
+enum RoomMode {
+  ROOM_MODE_UNSPECIFIED = 0;
+  ROOM_MODE_P2P = 1;
+  ROOM_MODE_UPGRADING = 2;
+  ROOM_MODE_SFU = 3;
+  ROOM_MODE_DOWNGRADING = 4;
+  ROOM_MODE_FAILED = 5;
+}
+
+message OperationResponse {
+  ResponseContext context = 1;
+
+  oneof result {
+    Empty ok = 2;
+    Error error = 3;
+  }
+}
+
+message Occupancy {
+  uint64 member_count = 1;
+  RoomMode mode = 2;
+}
+
+message OccupancyResponse {
+  ResponseContext context = 1;
+
+  oneof result {
+    Occupancy occupancy = 2;
+    Error error = 3;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AppRTC V1 RPCs
+// ---------------------------------------------------------------------------
+
+message AdmitV1Request {
+  RequestContext context = 1;
+  string room_id = 2;
+  string client_id = 3;
+  bool is_loopback = 4;
+}
+
+message AdmitV1Response {
+  ResponseContext context = 1;
+
+  oneof result {
+    V1Admission admitted = 2;
+    Error error = 3;
+  }
+}
+
+message V1Admission {
+  bool is_initiator = 1;
+
+  // Queued AppRTC application-signaling JSON. This preserves the legacy
+  // messages[] behavior used for an initiator's early offer.
+  repeated string messages = 2;
+}
+
+message RemoveV1Request {
+  RequestContext context = 1;
+  string room_id = 2;
+  string client_id = 3;
+}
+
+message OccupancyV1Request {
+  RequestContext context = 1;
+  string room_id = 2;
+}
+
+message InjectV1Request {
+  RequestContext context = 1;
+  string room_id = 2;
+  string client_id = 3;
+
+  // UTF-8 AppRTC application-signaling JSON. Signaling queues or relays this
+  // value without parsing its SDP/ICE contents.
+  string message_json = 4;
+}
+
+// ---------------------------------------------------------------------------
+// AppRTC V2 RPCs
+// ---------------------------------------------------------------------------
+
+message AdmitV2Request {
+  RequestContext context = 1;
+  uint64 room_id = 2;
+  uint64 client_id = 3;
+}
+
+message AdmitV2Response {
+  ResponseContext context = 1;
+
+  oneof result {
+    V2Admission admitted = 2;
+    Error error = 3;
+  }
+}
+
+message V2Admission {
+  // Admission completes only in a committed P2P or SFU mode. Transition modes
+  // are exposed by OccupancyV2 but are never returned here.
+  RoomMode mode = 1;
+  uint64 signal_epoch = 2;
+  string admission_token = 3;
+
+  // Present only in P2P mode. Absence in SFU mode is semantically different
+  // from false.
+  optional bool is_initiator = 4;
+}
+
+message RemoveV2Request {
+  RequestContext context = 1;
+  uint64 room_id = 2;
+  uint64 client_id = 3;
+  string admission_token = 4;
+}
+
+message OccupancyV2Request {
+  RequestContext context = 1;
+  uint64 room_id = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Service status
+// ---------------------------------------------------------------------------
+
+message StatusRequest {
+  RequestContext context = 1;
+}
+
+message StatusResponse {
+  ResponseContext context = 1;
+
+  oneof result {
+    Status status = 2;
+    Error error = 3;
+  }
+}
+
+message Status {
+  uint64 v1_rooms = 1;
+  uint64 v2_rooms = 2;
+  uint64 clients = 3;
+  uint64 browser_websocket_connections = 4;
+  uint64 total_browser_websocket_connections = 5;
+  uint64 browser_websocket_errors = 6;
+  uint64 connected_sfu_instances = 7;
+  uint64 ready_sfu_instances = 8;
+}
+
+// ---------------------------------------------------------------------------
+// SFU bidirectional stream
+// ---------------------------------------------------------------------------
+
+// Client-to-server stream envelope. RegisterSfu MUST be the first message and
+// MUST appear exactly once. Later messages are command results or reliable
+// worker events.
+message SfuToSignaling {
+  oneof message {
+    RegisterSfu register = 1;
+    SfuCommandResult command_result = 2;
+    SfuEvent event = 3;
+  }
+}
+
+// Server-to-client stream envelope.
+message SignalingToSfu {
+  oneof message {
+    RegisterSfuResponse registered = 1;
+    SfuCommand command = 2;
+    SfuEventAck event_ack = 3;
+  }
+}
+
+message RegisterSfu {
+  // context.app_id MUST be APP_ID_SFU. instance_id is the worker identity;
+  // there is deliberately no separate sfu_id.
+  RequestContext context = 1;
+  SfuCapacity capacity = 2;
+}
+
+message RegisterSfuResponse {
+  ResponseContext context = 1;
+
+  oneof result {
+    SfuRegistered registered = 2;
+    Error error = 3;
+  }
+}
+
+message SfuRegistered {
+  // Recommended interval for application-level health updates. HTTP/2
+  // keep-alive independently detects a dead transport.
+  uint64 health_interval_ms = 1;
+
+  // True when signaling recognized the same process incarnation after a
+  // transient disconnect. Signaling follows this response with SyncRoom
+  // commands before releasing queued browser signals.
+  bool resumed = 2;
+}
+
+message SfuCapacity {
+  uint64 max_rooms = 1;
+  uint64 max_clients = 2;
+}
+
+enum SfuState {
+  SFU_STATE_UNSPECIFIED = 0;
+  SFU_STATE_READY = 1;
+  SFU_STATE_DRAINING = 2;
+}
+
+message SfuHealth {
+  SfuState state = 1;
+  SfuCapacity capacity = 2;
+  uint64 current_rooms = 3;
+  uint64 current_clients = 4;
+}
+
+// A signaling-originated logical operation. request_id is nonzero and remains
+// stable when an unacknowledged command is replayed after stream reconnect.
+message SfuCommand {
+  uint64 request_id = 1;
+
+  oneof command {
+    SyncRoom sync_room = 10;
+    JoinMember join = 11;
+    LeaveMember leave = 12;
+    SfuSignal signal = 13;
+    DrainSfu drain = 14;
+  }
+}
+
+// SFU response to exactly one SfuCommand. It copies SfuCommand.request_id.
+message SfuCommandResult {
+  uint64 request_id = 1;
+
+  oneof result {
+    SfuCommandOk ok = 2;
+    Error error = 3;
+  }
+}
+
+message SfuCommandOk {
+  oneof payload {
+    Empty acknowledged = 1;
+    RoomSynced room_synced = 10;
+    MemberJoined member_joined = 11;
+    MemberLeft member_left = 12;
+  }
+}
+
+message MemberProjection {
+  uint64 client_id = 1;
+  uint64 lifecycle_id = 2;
+}
+
+message SyncRoom {
+  uint64 room_id = 1;
+  uint64 assignment_epoch = 2;
+  repeated MemberProjection members = 3;
+}
+
+message RoomSynced {
+  uint64 room_id = 1;
+  uint64 assignment_epoch = 2;
+}
+
+message JoinMember {
+  uint64 room_id = 1;
+  uint64 client_id = 2;
+  uint64 lifecycle_id = 3;
+  uint64 assignment_epoch = 4;
+}
+
+message MemberJoined {
+  uint64 room_id = 1;
+  uint64 client_id = 2;
+  uint64 lifecycle_id = 3;
+  uint64 assignment_epoch = 4;
+}
+
+enum LeaveReason {
+  LEAVE_REASON_UNSPECIFIED = 0;
+  LEAVE_REASON_USER = 1;
+  LEAVE_REASON_DISCONNECTED = 2;
+  LEAVE_REASON_DOWNGRADE = 3;
+  LEAVE_REASON_ROOM_CLOSED = 4;
+  LEAVE_REASON_WORKER_FAILURE = 5;
+}
+
+message LeaveMember {
+  uint64 room_id = 1;
+  uint64 client_id = 2;
+  uint64 lifecycle_id = 3;
+  uint64 assignment_epoch = 4;
+  LeaveReason reason = 5;
+}
+
+message MemberLeft {
+  uint64 room_id = 1;
+  uint64 client_id = 2;
+  uint64 lifecycle_id = 3;
+  uint64 assignment_epoch = 4;
+}
+
+// Opaque AppRTC application-signaling JSON. It may contain an SDP offer or
+// answer, one trickle ICE candidate, an end-of-candidates marker, or bye. The
+// SFU adapter parses it; the signaling authority does not.
+message SfuSignal {
+  uint64 room_id = 1;
+  uint64 client_id = 2;
+  uint64 lifecycle_id = 3;
+  uint64 assignment_epoch = 4;
+  string message_json = 5;
+
+  // Optional outer diagnostic correlation for SDP transactions. The browser's
+  // subscribe-answer requestid remains inside message_json for compatibility.
+  optional uint64 sdp_request_id = 6;
+}
+
+message DrainSfu {
+  optional uint64 deadline_unix_ms = 1;
+}
+
+// SFU-originated reliable event. request_id is allocated by the SFU instance,
+// reused when the event is retransmitted, and deduplicated by signaling as
+// (APP_ID_SFU, instance_id, request_id).
+message SfuEvent {
+  uint64 request_id = 1;
+
+  oneof event {
+    SfuSignal signal = 10;
+    SfuHealth health = 11;
+    SfuFailure failure = 12;
+  }
+}
+
+// Signaling acknowledges each accepted or deduplicated SfuEvent. This terminal
+// acknowledgement is not itself acknowledged.
+message SfuEventAck {
+  uint64 request_id = 1;
+}
+
+message SfuFailure {
+  Error error = 1;
+  optional uint64 room_id = 2;
+  optional uint64 client_id = 3;
+  optional uint64 lifecycle_id = 4;
+  optional uint64 sdp_request_id = 5;
+}

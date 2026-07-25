@@ -1,0 +1,23 @@
+[package]
+name = "signaling-proto"
+description = "Signaling Protobuf in Rust"
+documentation = "https://docs.rs/signaling-proto"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../README.md"
+
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true

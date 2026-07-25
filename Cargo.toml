@@ -1,14 +1,52 @@
-[package]
-name = "signaling"
-version = "0.20.0-rc.3"
+[workspace]
+members = [
+    "signaling-proto",
+]
+resolver = "2"
+
+[profile.dev]
+opt-level = 0
+
+[workspace.package]
+version = "0.3.0"
 authors = ["Rain Liu <y@liu.mx>"]
 edition = "2024"
-description = "Signaling in Rust"
 license = "MIT/Apache-2.0"
-documentation = "https://docs.rs/signaling"
 homepage = "https://webrtc.rs"
 repository = "https://github.com/webrtc-rs/signaling"
 keywords = ["signaling", "networking", "protocols"]
 categories = ["network-programming"]
 
+[workspace.dependencies]
+sansio = "1.0.1"
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+log = "0.4.33"
+prost = "0.14.4"
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"
+tonic = { version = "0.14.6", features = ["tls-ring", "tls-webpki-roots"] }
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
+
+[package]
+name = "signaling"
+description = "Signaling in Rust"
+documentation = "https://docs.rs/signaling"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
 [dependencies]
+sansio.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
