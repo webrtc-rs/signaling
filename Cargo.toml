@@ -32,7 +32,7 @@ tonic-prost-build = "0.14.6"
 
 [package]
 name = "signaling"
-description = "Signaling in Rust"
+description = "Sans-IO Signaling in Rust"
 documentation = "https://docs.rs/signaling"
 version.workspace = true
 authors.workspace = true

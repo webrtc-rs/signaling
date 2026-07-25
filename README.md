@@ -29,5 +29,5 @@
  </a>
 </p>
 <p align="center">
- <strong>Signaling in Rust</strong>
+ <strong>Sans-IO Signaling in Rust</strong>
 </p>
