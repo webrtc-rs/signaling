@@ -48,7 +48,7 @@ to the runtime that drives it.
 |-------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
 | `collider`        | The entry point. Owns both room tables, browser sessions, and the authority API; implements `sansio::Protocol`.                               |
 | `room_table`, `room`, `client` | The V1 model: opaque string IDs, at most two clients, initiator election, queued messages, register timeout, reconnect grace.   |
-| `v2`              | The V2 model: numeric `u64` IDs, admission tokens, signal epochs, room modes, the P2P→SFU join barrier, the SFU→P2P dwell, and the worker registry. |
+| `v2`              | The V2 model: UUID room ids with `u64` client ids, the room-token codec, admission tokens, signal epochs, room modes, the P2P→SFU join barrier, the SFU→P2P dwell, and the worker registry. |
 | `sfu`             | The worker-session model: typed commands (`SyncRoom`, `JoinMember`, `LeaveMember`, `SfuSignal`), their results, worker events, and lifecycle IDs. |
 | `messages`        | Browser wire frames, serialized as JSON by the driver.                                                                                        |
 
@@ -79,7 +79,8 @@ collider.set_downgrade_dwell(Duration::from_secs(2)); // SFU→P2P dwell; this i
 // A browser frame arrives on the driver's WebSocket.
 collider.handle_read(BrowserInput::Text {
     connection_id: 1,
-    text: r#"{"cmd":"register","roomid":"42","clientid":"101","ver":2,"token":"…"}"#.into(),
+    text: r#"{"cmd":"register","roomid":"grYp2g1QjrKVXUZLph46kA","clientid":"101","ver":2,"token":"…"}"#
+        .into(),
     now: Instant::now(),
 })?;
 
@@ -109,6 +110,10 @@ Event, Disconnected}`. Nothing in the crate ever calls a worker or a browser dir
   election, queued messages replayed at registration, and silent registration.
 - **V2 is token-bound and epoch-gated.** Registration requires an admission token bound to `(room_id, client_id)`, and
   every `send` carries the room's current signal epoch. Frames from a retired epoch are dropped rather than misrouted.
+- **A room id has exactly one spelling.** V2 rooms are UUIDv8 values minted by `new_room_id`, carried in links and
+  browser JSON as 22 base64url characters. `parse_room_token` accepts only a canonical encoding — right length, zero
+  trailing bits, version 8, RFC 9562 variant — because rooms are keyed by the value received, so a second spelling
+  would become a second room.
 - **Mode transitions are barriers, not flags.** A third join moves the room to `Upgrading`, selects the least-loaded
   ready worker by `(assigned_clients, assigned_rooms, instance_id)`, and commits `SFU` only after every `MemberJoined`
   result arrives. A room that sits at no more than two members for the downgrade dwell commits `P2P` again, elects the
