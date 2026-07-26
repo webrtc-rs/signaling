@@ -14,7 +14,8 @@ service SignalingService {
   rpc OccupancyV1(OccupancyV1Request) returns (OccupancyResponse);
   rpc InjectV1(InjectV1Request) returns (OperationResponse);
 
-  // SFU-capable AppRTC V2 operations. V2 room and client identifiers are u64.
+  // SFU-capable AppRTC V2 operations. A V2 room id is a 16-byte UUIDv8; a V2
+  // client id is a uint64.
   rpc AdmitV2(AdmitV2Request) returns (AdmitV2Response);
   rpc RemoveV2(RemoveV2Request) returns (OperationResponse);
   rpc OccupancyV2(OccupancyV2Request) returns (OccupancyResponse);

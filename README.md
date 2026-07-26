@@ -49,7 +49,7 @@ to the runtime that drives it.
 | `collider`        | The entry point. Owns both room tables, browser sessions, and the authority API; implements `sansio::Protocol`.                               |
 | `room_table`, `room`, `client` | The V1 model: opaque string IDs, at most two clients, initiator election, queued messages, register timeout, reconnect grace.   |
 | `v2`              | The V2 model: UUID room ids with `u64` client ids, the room-token codec, admission tokens, signal epochs, room modes, the P2P→SFU join barrier, the SFU→P2P dwell, and the worker registry. |
-| `sfu`             | The worker-session model: typed commands (`SyncRoom`, `JoinMember`, `LeaveMember`, `SfuSignal`), their results, worker events, and lifecycle IDs. |
+| `sfu`             | The worker-session model: typed commands (`CommandKind::{SyncRoom, Join, Leave, Signal}`), their results (`CommandOk`), worker events, and lifecycle IDs. |
 | `messages`        | Browser wire frames, serialized as JSON by the driver.                                                                                        |
 
 [`signaling-proto`](signaling-proto) is a workspace member holding the generated Protobuf/tonic contract that the web
@@ -62,7 +62,7 @@ server, this crate's driver, and SFU workers share.
 | Plane                | Type                                                          |
 |----------------------|---------------------------------------------------------------|
 | Read in              | `BrowserInput::{Connected, Text, Disconnected}`               |
-| Write in             | `AuthorityCommand` — `Admit`, `Remove`, `Occupancy`, `Inject`, `AdmitV2`, `RemoveV2`, `OccupancyV2`, `Status` (`Inject` is V1-only: V2 has no `/message` endpoint) |
+| Write in             | `AuthorityCommand { request_id, operation }`, where `AuthorityOperation` is `Admit`, `Remove`, `Occupancy`, `Inject`, `AdmitV2`, `RemoveV2`, `OccupancyV2`, or `Status` (`Inject` is V1-only: V2 has no `/message` endpoint) |
 | Write out (`poll_write`) | `BrowserOutput::{Text, Close, Sfu}`                       |
 | Event out (`poll_event`) | `AuthorityResponse` correlated by `request_id`            |
 | Time                 | `Instant`, via `poll_timeout` / `handle_timeout`              |
